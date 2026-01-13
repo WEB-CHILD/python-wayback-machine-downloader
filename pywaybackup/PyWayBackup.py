@@ -159,6 +159,11 @@ class PyWayBackup:
         self._reset = reset
         self._keep = keep
 
+        # configurable wait times for retry/backoff behavior
+        self._wait_reconnect = kwargs.get("wait_reconnect", 50)
+        self._wait_renew = kwargs.get("wait_renew", 15)
+        self._wait_retry = kwargs.get("wait_retry", 15)
+
         # module exclusive
         self._silent = silent
         self._debug = debug
@@ -345,6 +350,9 @@ class PyWayBackup:
             no_redirect=self._no_redirect,
             delay=self._delay,
             workers=self._workers,
+            wait_reconnect=self._wait_reconnect,
+            wait_renew=self._wait_renew,
+            wait_retry=self._wait_retry,
         )
         downloader.run(SnapshotCollection=collection)
 
