@@ -81,7 +81,7 @@ class DownloadArchive:
         sc (SnapshotCollection): The snapshot collection being processed.
     """
 
-    def __init__(self, mode: str, output: str, retry: int, no_redirect: bool, delay: int, workers: int, wait_reconnect: int = 50, wait_renew: int = 15, wait_retry: int = 15):
+    def __init__(self, mode: str, output: str, retry: int, no_redirect: bool, delay: int, workers: int, wait: int = 15):
         """
         Initialize the download manager with configuration options.
 
@@ -101,9 +101,7 @@ class DownloadArchive:
         self.workers = workers
         self.no_redirect = no_redirect
         self.sc = None
-        self.wait_reconnect = wait_reconnect
-        self.wait_renew = wait_renew
-        self.wait_retry = wait_retry
+        self.wait = wait
 
     def run(self, SnapshotCollection: SnapshotCollection):
         """
@@ -188,7 +186,7 @@ class DownloadArchive:
                                             f"\n-----> Worker: {worker.id}"
                                             f" - Attempt: [{worker.attempt}/{retry_max_attempt}]"
                                             f" Snapshot ID: [{worker.snapshot.counter}/{self.sc._snapshot_total}]"
-                                            f" - {e.__class__.__name__} - requesting again in {self.wait_reconnect * download_attempt} seconds..."
+                                            f" - {e.__class__.__name__} - requesting again in 50 seconds..."
                                         ),
                                     )
                                     vb.write(
@@ -196,10 +194,10 @@ class DownloadArchive:
                                         content=(
                                             f"Worker: {worker.id}"
                                             f" - Snapshot {worker.snapshot.counter}/{self.sc._snapshot_total}"
-                                            f" - requesting again in {self.wait_reconnect * download_attempt} seconds..."
+                                            f" - requesting again in 50 seconds..."
                                         ),
                                     )
-                                    time.sleep(self.wait_reconnect * download_attempt)
+                                    time.sleep(50)
                                     continue
 
                             elif isinstance(e, http.client.HTTPException):
@@ -211,7 +209,7 @@ class DownloadArchive:
                                             f"\n-----> Worker: {worker.id}"
                                             f" - Attempt: [{worker.attempt}/{retry_max_attempt}]"
                                             f" Snapshot ID: [{worker.snapshot.counter}/{self.sc._snapshot_total}]"
-                                            f" - {e.__class__.__name__} - renewing connection in {self.wait_renew * download_attempt} seconds..."
+                                            f" - {e.__class__.__name__} - renewing connection in {self.wait * download_attempt} seconds..."
                                         ),
                                     )
                                     vb.write(
@@ -219,10 +217,10 @@ class DownloadArchive:
                                         content=(
                                             f"Worker: {worker.id}"
                                             f" - Snapshot {worker.snapshot.counter}/{self.sc._snapshot_total}"
-                                            f" - renewing connection in {self.wait_renew * download_attempt} seconds..."
+                                            f" - renewing connection in {self.wait * download_attempt} seconds..."
                                         ),
                                     )
-                                    time.sleep(self.wait_renew * download_attempt)
+                                    time.sleep(self.wait * download_attempt)
                                     worker.refresh_connection()
                                     continue
                             else:
@@ -247,9 +245,9 @@ class DownloadArchive:
 
                         # depends on user - retries after timeout or proceed to next snapshot
                         if self.retry > 0:
-                            worker.message.store(verbose=True, result="FAILED", content=f"retry timeout: {self.wait_retry * worker.attempt} seconds...")
+                            worker.message.store(verbose=True, result="FAILED", content=f"retry timeout: {self.wait * worker.attempt} seconds...")
                             worker.message.write()
-                            time.sleep(self.wait_retry * worker.attempt)
+                            time.sleep(self.wait * worker.attempt)
                         else:
                             worker.message.store(verbose=None, result="FAILED", content="no attempt left")
                             worker.message.write()
