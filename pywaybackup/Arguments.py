@@ -40,7 +40,14 @@ class Arguments:
         behavior.add_argument("--retry", type=int, default=0, metavar="", help="retry failed downloads (opt tries as int, else infinite)")
         behavior.add_argument("--workers", type=int, default=1, metavar="", help="number of workers (simultaneous downloads)")
         behavior.add_argument("--delay", type=int, default=0, metavar="", help="delay between each download in seconds")
-
+        behavior.add_argument(
+            "--wait",
+            type=int,
+            default=15,
+            metavar="",
+            help="seconds to wait before renewing connection after HTTP errors or snapshot download errors (default: 15)",
+        )
+        
         special = parser.add_argument_group("special")
         special.add_argument("--reset", action="store_true", help="reset the job and ignore existing cdx/db/csv files")
         special.add_argument("--keep", action="store_true", help="keep all files after the job finished")
