@@ -1,7 +1,7 @@
 import os
 import threading
 
-from pywaybackup.db import Database, select, update, waybackup_snapshots
+from pywaybackup.db import Database, select, update, waybackup_snapshots, and_
 from pywaybackup.helper import url_split
 
 
@@ -70,20 +70,41 @@ class Snapshot:
             return False
 
         def __get_row():
-            with self._db.session.begin():
-                row = self._db.session.execute(
-                    select(waybackup_snapshots)
+            # Atomic claim: find next unprocessed scid, set response='LOCK' only if still unprocessed,
+            # then fetch that row. This avoids relying on FOR UPDATE or explicit nested transactions
+            # which can trigger "A transaction is already begun on this Session" errors.
+
+            session = self._db.session
+
+            # get next available SnapshotId
+            scid = (
+                session.execute(
+                    select(waybackup_snapshots.scid)
                     .where(waybackup_snapshots.response.is_(None))
                     .order_by(waybackup_snapshots.scid)
                     .limit(1)
-                    .with_for_update(skip_locked=True)
-                ).scalar_one_or_none()
+                )
+                .scalar_one_or_none()
+            )
 
-                if row is None:
-                    return None
+            if scid is None:
+                return None
 
-                row.response = "LOCK"
+            # try to atomically claim the row by updating only if still unclaimed
+            result = session.execute(
+                update(waybackup_snapshots)
+                .where(and_(waybackup_snapshots.scid == scid, waybackup_snapshots.response.is_(None)))
+                .values(response="LOCK")
+            )
 
+            # if another worker claimed it first, rowcount will be 0 and cannot be claimed by this worker.
+            if result.rowcount == 0:
+                session.commit()
+                return None
+
+            # The row has been claimed by the worker and can now be fetched.
+            row = session.execute(select(waybackup_snapshots).where(waybackup_snapshots.scid == scid)).scalar_one_or_none()
+            session.commit()
             return row
 
         if __on_sqlite():
