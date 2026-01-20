@@ -59,7 +59,15 @@ class CDXquery:
         )
         filter_filetype = f"&filter=original:.*\\.({'|'.join(self.filter_filetype)})$" if self.filter_filetype else ""
 
-        return f"https://web.archive.org/cdx/search/cdx?output=json&url={cdx_url}{period}&fl=timestamp,digest,mimetype,statuscode,original{limit}{filter_filetype}{filter_statuscode}"
+        return (
+            f"https://web.archive.org/cdx/search/cdx?"
+            f"output=json"
+            f"&url={cdx_url}{period}"
+            f"&fl=timestamp,digest,mimetype,statuscode,original"
+            f"{limit}"
+            f"{filter_filetype}"
+            f"{filter_statuscode}"
+        )
 
 
 class File:

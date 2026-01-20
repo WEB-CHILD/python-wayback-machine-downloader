@@ -9,7 +9,7 @@ import pywaybackup.archive_save as archive_save
 from pywaybackup.archive_download import DownloadArchive
 from pywaybackup.db import Database as db
 from pywaybackup.Exception import Exception as ex
-from pywaybackup.files import CDXfile, CDXquery, CSVfile, File
+from pywaybackup.files import CDXfile, CDXquery, CSVfile
 from pywaybackup.helper import sanitize_filename, url_split
 from pywaybackup.SnapshotCollection import SnapshotCollection
 from pywaybackup.Verbosity import Verbosity as vb
@@ -23,7 +23,7 @@ class _Status:
 
     Attributes:
         sc (SnapshotCollection): The current snapshot collection being processed.
-        task (str): The current task being performed (e.g., 'initializing', 'downloading cdx', 'preparing snapshots', 'downloading snapshots', 'done').
+        task (str): The current task being performed (e.g., 'initializing', 'downloading cdx', ...).
         handled (int): The number of snapshots that have been processed so far.
         total (int): The total number of snapshots to be processed.
         progress (float): The progress of the backup process as a percentage.
@@ -129,6 +129,7 @@ class PyWayBackup:
         retry: int = 0,
         workers: int = 1,
         delay: int = 0,
+        wait: int = 15,
         reset: bool = False,
         keep: bool = False,
         silent: bool = True,
@@ -156,11 +157,10 @@ class PyWayBackup:
         self._retry = retry
         self._workers = workers
         self._delay = delay
+        self._wait = wait
+
         self._reset = reset
         self._keep = keep
-
-        # configurable wait times for retry/backoff behavior
-        self._wait = kwargs.get("wait", 15)
 
         # module exclusive
         self._silent = silent
@@ -347,8 +347,8 @@ class PyWayBackup:
             retry=self._retry,
             no_redirect=self._no_redirect,
             delay=self._delay,
-            workers=self._workers,
             wait=self._wait,
+            workers=self._workers,
         )
         downloader.run(SnapshotCollection=collection)
 

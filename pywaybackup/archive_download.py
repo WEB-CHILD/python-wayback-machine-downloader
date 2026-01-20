@@ -81,7 +81,7 @@ class DownloadArchive:
         sc (SnapshotCollection): The snapshot collection being processed.
     """
 
-    def __init__(self, mode: str, output: str, retry: int, no_redirect: bool, delay: int, workers: int, wait: int = 15):
+    def __init__(self, mode: str, output: str, retry: int, no_redirect: bool, delay: int, wait: int, workers: int):
         """
         Initialize the download manager with configuration options.
 
@@ -98,10 +98,9 @@ class DownloadArchive:
         self.retry = retry
         self.no_redirect = no_redirect
         self.delay = delay
-        self.workers = workers
-        self.no_redirect = no_redirect
-        self.sc = None
         self.wait = wait
+        self.workers = workers
+        self.sc = None
 
     def run(self, SnapshotCollection: SnapshotCollection):
         """
@@ -245,7 +244,11 @@ class DownloadArchive:
 
                         # depends on user - retries after timeout or proceed to next snapshot
                         if self.retry > 0:
-                            worker.message.store(verbose=True, result="FAILED", content=f"retry timeout: {self.wait * worker.attempt} seconds...")
+                            worker.message.store(
+                                verbose=True,
+                                result="FAILED",
+                                content=f"retry timeout: {self.wait * worker.attempt} seconds...",
+                            )
                             worker.message.write()
                             time.sleep(self.wait * worker.attempt)
                         else:
