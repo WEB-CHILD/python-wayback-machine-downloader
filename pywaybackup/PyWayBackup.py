@@ -134,7 +134,6 @@ class PyWayBackup:
         silent: bool = True,
         debug: bool = False,
         max_snapshots_per_url: int = None,
-        path_depth: int = None,
         **kwargs: dict,
     ):
         self._url = url
@@ -161,7 +160,6 @@ class PyWayBackup:
         self._reset = reset
         self._keep = keep
         self._max_snapshots_per_url = max_snapshots_per_url
-        self._path_depth = path_depth
 
         # module exclusive
         self._silent = silent
@@ -189,11 +187,9 @@ class PyWayBackup:
             + str(self._end)
             + str(self._limit)
             + str(self._max_snapshots_per_url)
-            + str(self._path_depth)
             + str(self._filetype)
             + str(self._statuscode)
         )
-
         # if sys.argv is empty, we assume this is being run as a module
         if not sys.argv[1:]:
             self._command = "pywaybackup_module"
@@ -335,7 +331,6 @@ class PyWayBackup:
             cdxfile=self._cdxfile,
             csvfile=self._csvfile,
             max_snapshots_per_url=self._max_snapshots_per_url,
-            path_depth=self._path_depth,
         )
         collection.print_calculation()
         return collection

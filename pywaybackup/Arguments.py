@@ -46,12 +46,6 @@ class Arguments:
             metavar="",
             help="limit number of snapshots to keep per unique URL (distributed across date range)",
         )
-        behavior.add_argument(
-            "--path-depth",
-            type=int,
-            metavar="",
-            help="limit harvested URLs by path depth: 0=root only, 1=include immediate children, etc.",
-        )
 
         special = parser.add_argument_group("special")
         special.add_argument("--reset", action="store_true", help="reset the job and ignore existing cdx/db/csv files")
