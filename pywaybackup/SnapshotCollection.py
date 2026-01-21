@@ -283,17 +283,43 @@ class SnapshotCollection:
         First and last snapshots are preserved when limit > 1.
         """
         self._filter_snapshot_deleted = 0
+        limit = self._parse_snapshot_limit()
+        
+        if not (limit and limit > 0):
+            return
+
+        origins = self._find_origins_exceeding_limit(limit)
+        
+        for origin_row in origins:
+            origin = origin_row[0]
+            deleted_count = self._apply_limit_to_origin(origin, limit)
+            self._filter_snapshot_deleted += deleted_count
+
+    def _parse_snapshot_limit(self) -> int:
+        """
+        Parse and validate the max_snapshots_per_url configuration.
+        
+        Returns:
+            The validated limit as an integer, or None if invalid/not set.
+        """
         limit = None
         if self._max_snapshots_per_url:
             try:
                 limit = int(self._max_snapshots_per_url)
             except (TypeError, ValueError):
                 limit = None
+        return limit
 
-        if not (limit and limit > 0):
-            return
-
-        # Find origins that exceed the limit
+    def _find_origins_exceeding_limit(self, limit: int) -> list:
+        """
+        Query the database for origins that have more snapshots than the limit.
+        
+        Args:
+            limit: Maximum number of snapshots allowed per origin.
+            
+        Returns:
+            List of origin rows that exceed the limit.
+        """
         origins = (
             self.db.session.execute(
                 select(waybackup_snapshots.url_origin, func.count().label("cnt"))
@@ -302,34 +328,72 @@ class SnapshotCollection:
             )
             .all()
         )
+        return origins
 
-        for origin_row in origins:
-            origin = origin_row[0]
-            # Fetch ordered scids for this origin (ascending timestamps)
-            scid_rows = (
-                self.db.session.execute(
-                    select(waybackup_snapshots.scid)
-                    .where(waybackup_snapshots.url_origin == origin)
-                    .order_by(waybackup_snapshots.timestamp.asc())
-                )
-                .scalars()
-                .all()
+    def _apply_limit_to_origin(self, origin: str, limit: int) -> int:
+        """
+        Apply the snapshot limit to a specific origin by deleting excess snapshots.
+        
+        Fetches all snapshots for the origin, computes which ones to keep using
+        distributed selection, and deletes the rest.
+        
+        Args:
+            origin: The url_origin to apply the limit to.
+            limit: Maximum number of snapshots to keep.
+            
+        Returns:
+            Number of snapshots deleted for this origin.
+        """
+        scid_rows = self._fetch_ordered_scids(origin)
+        total = len(scid_rows)
+        
+        if total <= limit:
+            return 0
+
+        indices = self._compute_distributed_indices(total, limit)
+        keep_scids = [scid_rows[i] for i in indices]
+        
+        deleted_count = self._delete_excess_snapshots(origin, keep_scids)
+        return deleted_count
+
+    def _fetch_ordered_scids(self, origin: str) -> list:
+        """
+        Fetch all snapshot IDs for a given origin, ordered by timestamp ascending.
+        
+        Args:
+            origin: The url_origin to fetch snapshots for.
+            
+        Returns:
+            List of scid values in timestamp order.
+        """
+        scid_rows = (
+            self.db.session.execute(
+                select(waybackup_snapshots.scid)
+                .where(waybackup_snapshots.url_origin == origin)
+                .order_by(waybackup_snapshots.timestamp.asc())
             )
-            total = len(scid_rows)
-            if total <= limit:
-                continue
+            .scalars()
+            .all()
+        )
+        return scid_rows
 
-            # Compute indices to keep (distributed across range)
-            indices = self._compute_distributed_indices(total, limit)
-            keep_scids = [scid_rows[i] for i in indices]
-
-            # Delete non-kept snapshots for this origin
-            stmt = delete(waybackup_snapshots).where(
-                and_(waybackup_snapshots.url_origin == origin, ~waybackup_snapshots.scid.in_(keep_scids))
-            )
-            result = self.db.session.execute(stmt)
-            self.db.session.commit()
-            self._filter_snapshot_deleted += result.rowcount
+    def _delete_excess_snapshots(self, origin: str, keep_scids: list) -> int:
+        """
+        Delete snapshots for an origin that are not in the keep list.
+        
+        Args:
+            origin: The url_origin to delete snapshots from.
+            keep_scids: List of scid values to preserve.
+            
+        Returns:
+            Number of snapshots deleted.
+        """
+        stmt = delete(waybackup_snapshots).where(
+            and_(waybackup_snapshots.url_origin == origin, ~waybackup_snapshots.scid.in_(keep_scids))
+        )
+        result = self.db.session.execute(stmt)
+        self.db.session.commit()
+        return result.rowcount
 
     def _compute_distributed_indices(self, total: int, limit: int) -> list:
         """
