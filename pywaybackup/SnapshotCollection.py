@@ -4,6 +4,7 @@ from pywaybackup.db import Database, Index, and_, delete, func, or_, select, tup
 from pywaybackup.files import CDXfile, CSVfile
 from pywaybackup.Verbosity import Progressbar
 from pywaybackup.Verbosity import Verbosity as vb
+from pywaybackup.helper import url_split
 
 func: callable
 
@@ -19,7 +20,8 @@ class SnapshotCollection:
         self.csvfile = None
         self._mode_first = False
         self._mode_last = False
-
+        self._max_snapshots_per_url = None
+      
         self._cdx_total = 0  # absolute amount of snapshots in cdx file
         self._snapshot_total = 0  # absolute amount of snapshots in db
 
@@ -60,7 +62,7 @@ class SnapshotCollection:
         self.db.write_progress(self._snapshot_handled, self._snapshot_total)
         self.db.session.close()
 
-    def load(self, mode: str, cdxfile: CDXfile, csvfile: CSVfile):
+    def load(self, mode: str, cdxfile: CDXfile, csvfile: CSVfile, max_snapshots_per_url: int = None):
         """
         Insert the content of the cdx and csv file into the snapshot table.
         """
@@ -87,6 +89,8 @@ class SnapshotCollection:
             vb.write(verbose=True, content="\nAlready indexed snapshots")
         if not self.db.get_filter_complete():
             vb.write(content="\nFiltering snapshots (last or first version)...")
+            # set per-url limit (if provided) and then filter
+            self._max_snapshots_per_url = max_snapshots_per_url
             self._filter_snapshots()  # filter: keep newest or oldest based on MODE
             self.db.set_filter_complete()
         else:
@@ -244,59 +248,220 @@ class SnapshotCollection:
 
     def _filter_snapshots(self):
         """
-        Filter the snapshot table.
-
-        - MODE_LAST → keep only the latest snapshot (highest timestamp) per url_origin.
-        - MODE_FIRST → keep only the earliest snapshot (lowest timestamp) per url_origin.
+        Filter the snapshot table by applying mode and per-URL limits.
+        Orchestrates the full filtering pipeline.
         """
+        self._filter_mode_snapshots()
+        self._filter_by_max_snapshots_per_url()
+        self._enumerate_counter()
+        self._count_response_status()
 
-        def _filter_mode():
-            self._filter_mode = 0
-            if self._mode_last or self._mode_first:
-                ordering = (
-                    waybackup_snapshots.timestamp.desc() if self._mode_last else waybackup_snapshots.timestamp.asc()
+    def _filter_mode_snapshots(self):
+        """
+        Filter snapshots by mode (first or last version).
+        
+        - MODE_LAST: keep only the latest snapshot (highest timestamp) per url_origin.
+        - MODE_FIRST: keep only the earliest snapshot (lowest timestamp) per url_origin.
+        """
+        self._filter_mode = 0
+        if self._mode_last or self._mode_first:
+            ordering = (
+                waybackup_snapshots.timestamp.desc() if self._mode_last else waybackup_snapshots.timestamp.asc()
+            )
+            # assign row numbers per url_origin
+            rownum = (
+                func.row_number()
+                .over(
+                    partition_by=waybackup_snapshots.url_origin,
+                    order_by=ordering,
                 )
-                # assign row numbers per url_origin
-                rownum = (
-                    func.row_number()
-                    .over(
-                        partition_by=waybackup_snapshots.url_origin,
-                        order_by=ordering,
-                    )
-                    .label("rn")
-                )
-                subq = select(waybackup_snapshots.scid, rownum).subquery()
-                # keep rn == 1, delete all others
-                keepers = select(subq.c.scid).where(subq.c.rn == 1)
-                stmt = delete(waybackup_snapshots).where(~waybackup_snapshots.scid.in_(keepers))
-                result = self.db.session.execute(stmt)
-                self.db.session.commit()
-                self._filter_mode = result.rowcount
+                .label("rn")
+            )
+            subq = select(waybackup_snapshots.scid, rownum).subquery()
+            # keep rn == 1, delete all others
+            keepers = select(subq.c.scid).where(subq.c.rn == 1)
+            stmt = delete(waybackup_snapshots).where(~waybackup_snapshots.scid.in_(keepers))
+            result = self.db.session.execute(stmt)
+            self.db.session.commit()
+            self._filter_mode = result.rowcount
 
-        def _enumerate_counter():
-            # this sets the counter (snapshot number x / y) to 1 ... n
-            offset = 1
-            batch_size = 5000
-            while True:
-                rows = (
-                    self.db.session.execute(
-                        select(waybackup_snapshots.scid)
-                        .where(waybackup_snapshots.counter.is_(None))
-                        .order_by(waybackup_snapshots.scid)
-                        .limit(batch_size)
-                    )
-                    .scalars()
-                    .all()
-                )
-                if not rows:
-                    break
-                mappings = [{"scid": scid, "counter": i} for i, scid in enumerate(rows, start=offset)]
-                self.db.session.bulk_update_mappings(waybackup_snapshots, mappings)
-                self.db.session.commit()
-                offset += len(rows)
+    def _filter_by_max_snapshots_per_url(self):
+        """
+        Limit snapshots per unique URL, distributed across the date range.
+        
+        Keeps up to `self._max_snapshots_per_url` snapshots per `url_origin`.
+        Selection is distributed across available timestamps to represent the full timespan.
+        First and last snapshots are preserved when limit > 1.
+        """
+        self._filter_snapshot_deleted = 0
+        limit = self._parse_snapshot_limit()
+        
+        if not (limit and limit > 0):
+            return
 
-        _filter_mode()
-        _enumerate_counter()
+        origins = self._find_origins_exceeding_limit(limit)
+        
+        for origin_row in origins:
+            origin = origin_row[0]
+            deleted_count = self._apply_limit_to_origin(origin, limit)
+            self._filter_snapshot_deleted += deleted_count
+
+    def _parse_snapshot_limit(self) -> int:
+        """
+        Parse and validate the max_snapshots_per_url configuration.
+        
+        Returns:
+            The validated limit as an integer, or None if invalid/not set.
+        """
+        limit = None
+        if self._max_snapshots_per_url:
+            try:
+                limit = int(self._max_snapshots_per_url)
+            except (TypeError, ValueError):
+                limit = None
+        return limit
+
+    def _find_origins_exceeding_limit(self, limit: int) -> list:
+        """
+        Query the database for origins that have more snapshots than the limit.
+        
+        Args:
+            limit: Maximum number of snapshots allowed per origin.
+            
+        Returns:
+            List of origin rows that exceed the limit.
+        """
+        origins = (
+            self.db.session.execute(
+                select(waybackup_snapshots.url_origin, func.count().label("cnt"))
+                .group_by(waybackup_snapshots.url_origin)
+                .having(func.count() > limit)
+            )
+            .all()
+        )
+        return origins
+
+    def _apply_limit_to_origin(self, origin: str, limit: int) -> int:
+        """
+        Apply the snapshot limit to a specific origin by deleting excess snapshots.
+        
+        Fetches all snapshots for the origin, computes which ones to keep using
+        distributed selection, and deletes the rest.
+        
+        Args:
+            origin: The url_origin to apply the limit to.
+            limit: Maximum number of snapshots to keep.
+            
+        Returns:
+            Number of snapshots deleted for this origin.
+        """
+        scid_rows = self._fetch_ordered_scids(origin)
+        total = len(scid_rows)
+        
+        if total <= limit:
+            return 0
+
+        indices = self._compute_distributed_indices(total, limit)
+        keep_scids = [scid_rows[i] for i in indices]
+        
+        deleted_count = self._delete_excess_snapshots(origin, keep_scids)
+        return deleted_count
+
+    def _fetch_ordered_scids(self, origin: str) -> list:
+        """
+        Fetch all snapshot IDs for a given origin, ordered by timestamp ascending.
+        
+        Args:
+            origin: The url_origin to fetch snapshots for.
+            
+        Returns:
+            List of scid values in timestamp order.
+        """
+        scid_rows = (
+            self.db.session.execute(
+                select(waybackup_snapshots.scid)
+                .where(waybackup_snapshots.url_origin == origin)
+                .order_by(waybackup_snapshots.timestamp.asc())
+            )
+            .scalars()
+            .all()
+        )
+        return scid_rows
+
+    def _delete_excess_snapshots(self, origin: str, keep_scids: list) -> int:
+        """
+        Delete snapshots for an origin that are not in the keep list.
+        
+        Args:
+            origin: The url_origin to delete snapshots from.
+            keep_scids: List of scid values to preserve.
+            
+        Returns:
+            Number of snapshots deleted.
+        """
+        stmt = delete(waybackup_snapshots).where(
+            and_(waybackup_snapshots.url_origin == origin, ~waybackup_snapshots.scid.in_(keep_scids))
+        )
+        result = self.db.session.execute(stmt)
+        self.db.session.commit()
+        return result.rowcount
+
+    def _compute_distributed_indices(self, total: int, limit: int) -> list:
+        """
+        Compute which indices to keep for time-distributed snapshot selection.
+        
+        Ensures snapshots are evenly distributed across the date range,
+        preserving first and last snapshots when limit > 1.
+        
+        Args:
+            total: Total number of snapshots available.
+            limit: Maximum number of snapshots to keep.
+            
+        Returns:
+            Sorted list of indices to keep.
+        """
+        indices = []
+        if limit == 1:
+            # Pick middle snapshot as representative
+            indices = [total // 2]
+        else:
+            for i in range(limit):
+                idx = round(i * (total - 1) / (limit - 1))
+                indices.append(int(idx))
+
+        # Ensure unique and valid indices
+        indices = sorted(set(max(0, min(total - 1, i)) for i in indices))
+        return indices
+
+    def _enumerate_counter(self):
+        """
+        Assign sequential counter values to all snapshots.
+        
+        Sets the counter field (snapshot number x / y) for ordering and progress tracking.
+        Processes in batches for efficiency.
+        """
+        offset = 1
+        batch_size = 5000
+        while True:
+            rows = (
+                self.db.session.execute(
+                    select(waybackup_snapshots.scid)
+                    .where(waybackup_snapshots.counter.is_(None))
+                    .order_by(waybackup_snapshots.scid)
+                    .limit(batch_size)
+                )
+                .scalars()
+                .all()
+            )
+            if not rows:
+                break
+            mappings = [{"scid": scid, "counter": i} for i, scid in enumerate(rows, start=offset)]
+            self.db.session.bulk_update_mappings(waybackup_snapshots, mappings)
+            self.db.session.commit()
+            offset += len(rows)
+
+    def _count_response_status(self):
+        """Count snapshots with non-retrieval status codes (404, 301)."""
         self._filter_response = (
             self.db.session.query(waybackup_snapshots).where(waybackup_snapshots.response.in_(["404", "301"])).count()
         )
