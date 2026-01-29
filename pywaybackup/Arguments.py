@@ -48,21 +48,25 @@ class Arguments:
         behavior.add_argument("--workers", type=int, default=1, metavar="", help="number of workers (simultaneous downloads)")
         behavior.add_argument("--delay", type=int, default=0, metavar="", help="delay between each download in seconds")
         behavior.add_argument(
-<<<<<<< HEAD
-            "--max-snapshots-per-url",
-            type=int,
-            metavar="",
-            help="limit number of snapshots to keep per unique URL (distributed across date range)",
-        )
-        behavior.add_argument("--wait", type=int, default=15, metavar="", help="seconds to wait before renewing connection after HTTP errors or snapshot download errors (default: 15)")
-=======
             "--wait",
             type=int,
             default=15,
             metavar="",
             help="seconds to wait before renewing connection after HTTP errors or snapshot download errors (default: 15)",
         )
->>>>>>> 964c519 (implemented verbosity tiers 'low, default, high')
+        behavior.add_argument(
+            "--max-snapshots-per-url",
+            type=int,
+            metavar="",
+            help="limit number of snapshots to keep per unique URL (distributed across date range)",
+        )
+        behavior.add_argument("--wait", type=int, default=15, metavar="", help="seconds to wait before renewing connection after HTTP errors or snapshot download errors (default: 15)"
+            "--wait",
+            type=int,
+            default=15,
+            metavar="",
+            help="seconds to wait before renewing connection after HTTP errors or snapshot download errors (default: 15)",
+        )
 
         special = parser.add_argument_group("special")
         special.add_argument("--reset", action="store_true", help="reset the job and ignore existing cdx/db/csv files")
