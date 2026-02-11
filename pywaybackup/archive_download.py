@@ -52,12 +52,15 @@ class DownloadContext:
         """
         URL-encode the given string, preserving certain safe characters.
 
+        Preserves characters commonly found in URLs including query strings
+        (?, &, =) to ensure Wayback Machine can correctly resolve the request.
+
         Args:
             url (str): The URL to encode.
         Returns:
             str: The encoded URL.
         """
-        return urllib.parse.quote(url, safe=":/")
+        return urllib.parse.quote(url, safe=":/?&=")
 
     @property
     def response_status_message(self):
