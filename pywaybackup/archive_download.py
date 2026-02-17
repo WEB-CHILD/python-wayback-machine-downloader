@@ -269,7 +269,16 @@ class DownloadArchive:
                     time.sleep(self.delay)
 
         except Exception as e:
+            try:
+                worker.db.session.rollback()
+            except Exception:
+                pass
             ex.exception(f"\nWorker: {worker.id} - Exception", e)
+        finally:
+            try:
+                worker.db.session.close()
+            except Exception:
+                pass
 
     def _download(self, worker: Worker):
         """

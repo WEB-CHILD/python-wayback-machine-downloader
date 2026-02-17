@@ -46,10 +46,10 @@ class Snapshot:
             self.timestamp = self._row.timestamp
             self.url_archive = self._row.url_archive
             self.url_origin = self._row.url_origin
-            self.redirect_url = self._row.redirect_url
-            self.redirect_timestamp = self._row.redirect_timestamp
-            self.response_status = self._row.response
-            self.file = self._row.file
+            self._redirect_url = self._row.redirect_url
+            self._redirect_timestamp = self._row.redirect_timestamp
+            self._response_status = self._row.response
+            self._file = self._row.file
         else:
             self.counter = False
 
@@ -70,19 +70,19 @@ class Snapshot:
             return False
 
         def __get_row():
-            with self._db.session.begin():
-                row = self._db.session.execute(
-                    select(waybackup_snapshots)
-                    .where(waybackup_snapshots.response.is_(None))
-                    .order_by(waybackup_snapshots.scid)
-                    .limit(1)
-                    .with_for_update(skip_locked=True)
-                ).scalar_one_or_none()
+            row = self._db.session.execute(
+                select(waybackup_snapshots)
+                .where(waybackup_snapshots.response.is_(None))
+                .order_by(waybackup_snapshots.scid)
+                .limit(1)
+                .with_for_update(skip_locked=True)
+            ).scalar_one_or_none()
 
-                if row is None:
-                    return None
+            if row is None:
+                return None
 
-                row.response = "LOCK"
+            row.response = "LOCK"
+            self._db.session.commit()
 
             return row
 
