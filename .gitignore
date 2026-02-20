@@ -167,3 +167,7 @@ cython_debug/
 
 # custom
 test.py
+.github/copilot-instructions.md
+.python-version
+.github/.DS_Store
+.DS_Store
