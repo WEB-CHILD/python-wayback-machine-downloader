@@ -4,7 +4,7 @@ import time
 from sqlalchemy.exc import OperationalError
 
 from pywaybackup.db import Database, select, update, waybackup_snapshots
-from pywaybackup.helper import url_split
+from pywaybackup.helper import url_split, truncate_filename, truncate_path_components
 
 
 class Snapshot:
@@ -137,10 +137,17 @@ class Snapshot:
         If mode is 'first' or 'last', the path does not include the timestamp.
         Otherwise, the timestamp is included in the path.
 
+        Filenames exceeding filesystem limits (255 bytes) are truncated while preserving
+        the file extension and adding a hash suffix for uniqueness.
+
         Returns:
             str: Absolute path to the output file for the snapshot.
         """
         domain, subdir, filename = url_split(self.url_archive.split("id_/")[1], index=True)
+
+        # Truncate path components if they exceed filesystem limits
+        subdir = truncate_path_components(subdir)
+        filename = truncate_filename(filename)
 
         if self.mode == "last" or self.mode == "first":
             download_dir = os.path.join(self.output, domain, subdir)

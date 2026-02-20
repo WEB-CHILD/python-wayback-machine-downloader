@@ -1,5 +1,6 @@
 import os
 import shutil
+import hashlib
 import pylibmagic
 import magic
 
@@ -107,3 +108,63 @@ def check_index_mime(filebuffer: bytes) -> bool:
     if mime_type != "text/html":
         return False
     return True
+
+
+def truncate_filename(filename: str, max_length: int = 200) -> str:
+    """
+    Truncate a filename if it exceeds the maximum length.
+
+    Preserves file extension and adds a hash suffix to maintain uniqueness.
+    Most filesystems have a 255-byte limit per component; we use 200 as a safe limit.
+
+    Args:
+        filename (str): The original filename to truncate.
+        max_length (int): Maximum length for the filename (default 200 bytes).
+
+    Returns:
+        str: The truncated filename or original if within limits.
+    """
+    filename_bytes = filename.encode("utf-8")
+
+    # If within limits, return as-is
+    if len(filename_bytes) <= max_length:
+        return filename
+
+    # Split filename and extension
+    if "." in filename:
+        name_part, ext = filename.rsplit(".", 1)
+        ext = "." + ext
+    else:
+        name_part = filename
+        ext = ""
+
+    # Create a hash of the original filename for uniqueness
+    hash_suffix = "_" + hashlib.md5(filename.encode("utf-8")).hexdigest()[:8]
+
+    # Truncate the name part to fit
+    truncated_name = name_part
+    while len((truncated_name + hash_suffix + ext).encode("utf-8")) > max_length and truncated_name:
+        truncated_name = truncated_name[:-1]
+
+    return truncated_name + hash_suffix + ext
+
+
+def truncate_path_components(path: str, max_length: int = 200) -> str:
+    """
+    Truncate long path components while preserving directory structure.
+
+    Each directory component is truncated independently if it exceeds max_length.
+
+    Args:
+        path (str): The directory path with "/" separators.
+        max_length (int): Maximum length for each path component (default 200 bytes).
+
+    Returns:
+        str: Path with truncated components.
+    """
+    if not path:
+        return path
+
+    components = path.split("/")
+    truncated_components = [truncate_filename(comp, max_length) if comp else comp for comp in components]
+    return "/".join(truncated_components)
