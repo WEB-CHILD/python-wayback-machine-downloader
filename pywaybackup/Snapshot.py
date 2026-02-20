@@ -1,5 +1,7 @@
 import os
 import threading
+import time
+from sqlalchemy.exc import OperationalError
 
 from pywaybackup.db import Database, select, update, waybackup_snapshots
 from pywaybackup.helper import url_split
@@ -95,16 +97,38 @@ class Snapshot:
     def modify(self, column, value):
         """
         Update a column value for this snapshot in the database.
+        
+        Implements retry logic with exponential backoff to handle SQLite lock contention
+        when multiple workers attempt concurrent writes.
 
         Args:
             column (str): Name of the column to update.
             value: New value to set for the column.
+        
+        Raises:
+            OperationalError: If database remains locked after all retry attempts.
         """
         column = getattr(waybackup_snapshots, column)
-        self._db.session.execute(
-            update(waybackup_snapshots).where(waybackup_snapshots.scid == self.scid).values({column: value})
-        )
-        self._db.session.commit()
+        max_retries = 10
+        retry_delay = 0.1  # Start with 100ms
+        
+        for attempt in range(max_retries):
+            try:
+                self._db.session.execute(
+                    update(waybackup_snapshots).where(waybackup_snapshots.scid == self.scid).values({column: value})
+                )
+                self._db.session.commit()
+                return  # Success, exit the function
+            except OperationalError as e:
+                if "database is locked" in str(e) and attempt < max_retries - 1:
+                    # Wait with exponential backoff before retrying
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Double the delay for next attempt
+                    # Rollback the failed transaction
+                    self._db.session.rollback()
+                else:
+                    # Re-raise if not a lock error or if we've exhausted retries
+                    raise
 
     def create_output(self):
         """
