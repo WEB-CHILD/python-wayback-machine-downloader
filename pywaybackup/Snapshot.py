@@ -72,6 +72,12 @@ class Snapshot:
             return False
 
         def __get_row():
+            # Rollback any residual auto-begun transaction to ensure a clean state.
+            # This prevents InvalidRequestError when a prior exception (e.g. OSError)
+            # left the session with an implicitly started transaction.
+            if self._db.session.in_transaction():
+                self._db.session.rollback()
+
             with self._db.session.begin():
                 row = self._db.session.execute(
                     select(waybackup_snapshots)
