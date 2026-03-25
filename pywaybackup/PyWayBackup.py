@@ -364,6 +364,7 @@ class PyWayBackup:
         resources after the backup is complete.
 
         """
+        collection = None
         try:
             self._startup()
 
@@ -385,6 +386,12 @@ class PyWayBackup:
             self._keep = True
             ex.exception(message="", e=e)
         finally:
+            # if a collection was created during the workflow, close its DB session cleanly
+            try:
+                if collection:
+                    collection.close()
+            except Exception:
+                pass
             self._shutdown()
 
     def paths(self, rel: bool = False) -> dict:
@@ -409,8 +416,8 @@ class PyWayBackup:
             "cdxfile": self._cdxfile.filepath,
             "dbfile": self._dbfile,
             "csvfile": self._csvfile.filepath,
-            "log": self._log,
-            "debug": self._debug,
+            "log": self._logfile,
+            "debug": self._debugfile,
         }
         return {
             key: (os.path.relpath(path) if rel else path)

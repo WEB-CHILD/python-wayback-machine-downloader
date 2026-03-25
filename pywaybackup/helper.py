@@ -1,6 +1,5 @@
 import os
 import shutil
-import pylibmagic
 import magic
 
 
@@ -15,7 +14,7 @@ def sanitize_filename(filename: str) -> str:
     """
     Sanitize a string to be used as (part of) a filename.
     """
-    disallowed = ["<", ">", ":", '"', "/", "\\", "|", "?", "*"]
+    disallowed = ["<", ">", ":", '"', "/", "\\", "|", "?", "*", "=", "#", "!", "~"]
     for char in disallowed:
         filename = filename.replace(char, ".")
     filename = ".".join(filter(None, filename.split(".")))
@@ -54,7 +53,7 @@ def url_split(url, index=False):
     if "://" in url:
         url = url.split("://")[1]
     domain = url.split("/")[0]
-    path = url[len(domain) :]
+    path = url[len(domain):]  # fmt: skip
     domain = domain.split("@")[-1].split(":")[0]  # remove mailto and port
     path_parts = path.split("/")
     path_end = path_parts[-1]
@@ -63,12 +62,12 @@ def url_split(url, index=False):
     else:
         filename = "index.html" if index else ""
     subdir = "/".join(path_parts).strip("/")
-    # sanitize subdir and filename for windows
-    if check_nt():
-        special_chars = [":", "*", "?", "&", "=", "<", ">", "\\", "|"]
-        for char in special_chars:
-            subdir = subdir.replace(char, f"%{ord(char):02x}")
-            filename = filename.replace(char, f"%{ord(char):02x}")
+
+    # Sanitize special characters that are problematic in file- and foldernames
+    special_chars = [":", "*", "?", "&", "=", "<", ">", "\\", "|", "#", "!", "~"]
+    for char in special_chars:
+        subdir = subdir.replace(char, f"%{ord(char):02x}")
+        filename = filename.replace(char, f"%{ord(char):02x}")
     filename = filename.replace("%20", " ")
     return domain, subdir, filename
 

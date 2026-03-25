@@ -275,10 +275,7 @@ class DownloadArchive:
                 pass
             ex.exception(f"\nWorker: {worker.id} - Exception", e)
         finally:
-            try:
-                worker.db.session.close()
-            except Exception:
-                pass
+            worker.close()  
 
     def _download(self, worker: Worker):
         """
