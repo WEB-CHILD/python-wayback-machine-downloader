@@ -15,10 +15,13 @@ from sqlalchemy import (  # noqa: F401
     tuple_,
     update,
 )
+from sqlalchemy import event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from typing import Optional  # python 3.8
 from pywaybackup.Verbosity import Verbosity as vb
+
+SQLITE_BUSY_TIMEOUT = 30  # seconds a connection waits on a contended lock before raising 'database is locked'
 
 Base = declarative_base()
 
@@ -109,13 +112,28 @@ class Database:
         """
         cls.dbfile = dbfile
         cls.query_identifier = query_identifier
-        engine = create_engine(f"sqlite:///{dbfile}")
+        engine = create_engine(
+            f"sqlite:///{dbfile}",
+            connect_args={"timeout": SQLITE_BUSY_TIMEOUT, "check_same_thread": False},
+            max_overflow=-1,  # one long-lived session per worker; never cap below the worker count
+        )
+
+        @event.listens_for(engine, "connect")
+        def _set_sqlite_pragma(dbapi_connection, connection_record):
+            # WAL: writers no longer block readers (and vice versa), which is what
+            # starves concurrent workers in the default rollback-journal mode
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT * 1000}")
+            cursor.close()
+
         cls.sessman = sessionmaker(bind=engine)
         Base.metadata.create_all(engine)
 
         db = Database()
         if db.session.execute(
-            select(waybackup_job.query_identifier).where(query_identifier == query_identifier)
+            select(waybackup_job.query_identifier).where(waybackup_job.query_identifier == query_identifier)
         ).fetchone():
             cls.query_exist = True
             cls.query_progress = db.get_progress()

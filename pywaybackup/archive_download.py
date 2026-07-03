@@ -2,7 +2,6 @@ import gzip
 import http.client
 import os
 import threading
-import time
 import urllib.parse
 from gzip import BadGzipFile
 from http import HTTPStatus
@@ -104,6 +103,7 @@ class DownloadArchive:
         self.wait = wait
         self.workers = workers
         self.sc = None
+        self._stop_event = threading.Event()
 
     def run(self, SnapshotCollection: SnapshotCollection):
         """
@@ -136,8 +136,18 @@ class DownloadArchive:
             threads.append(thread)
             thread.start()
 
-        for thread in threads:
-            thread.join()
+        try:
+            for thread in threads:
+                while thread.is_alive():
+                    thread.join(timeout=1)  # join with timeout so KeyboardInterrupt is handled promptly
+        except KeyboardInterrupt:
+            # signal workers to stop after their current snapshot, wait for them so the db is
+            # left without open transactions (avoids 'database is locked' on the next resume)
+            vb.write(content="\nInterrupted - waiting for workers to finish their current snapshot...")
+            self._stop_event.set()
+            for thread in threads:
+                thread.join(timeout=60)
+            raise
 
     def _download_loop(self, worker: Worker):
         """
@@ -148,15 +158,36 @@ class DownloadArchive:
         """
         try:
             worker.init()
+            assign_failures = 0
 
-            while True:
-                worker.assign_snapshot(total_amount=self.sc._snapshot_total)
+            while not self._stop_event.is_set():
+                try:
+                    worker.assign_snapshot(total_amount=self.sc._snapshot_total)
+                except Exception as e:
+                    # a transient db error (e.g. 'database is locked') must not end the worker
+                    assign_failures += 1
+                    try:
+                        worker.db.session.rollback()
+                    except Exception:
+                        pass
+                    if assign_failures >= 5:
+                        ex.exception(f"\nWorker: {worker.id} - giving up after {assign_failures} failed assignments", e)
+                        break
+                    vb.write(
+                        verbose=True,
+                        content=f"\n-----> Worker: {worker.id} - assign failed ({e.__class__.__name__}), retrying...",
+                    )
+                    self._stop_event.wait(2 * assign_failures)
+                    continue
+                assign_failures = 0
                 if not worker.snapshot:
                     break
 
                 retry_max_attempt = max(self.retry, 1)
 
                 while worker.attempt <= retry_max_attempt:  # retry as given by user
+                    if self._stop_event.is_set():
+                        break
                     worker.message.store(
                         verbose=True,
                         content=(
@@ -169,6 +200,8 @@ class DownloadArchive:
                     download_max_attempt = 3
 
                     while download_attempt <= download_max_attempt:  # reconnect as given by system
+                        if self._stop_event.is_set():
+                            break
                         download_status = False
 
                         try:
@@ -201,7 +234,7 @@ class DownloadArchive:
                                             f" - requesting again in 50 seconds..."
                                         ),
                                     )
-                                    time.sleep(50)
+                                    self._stop_event.wait(50)
                                     continue
 
                             elif isinstance(e, http.client.HTTPException):
@@ -224,7 +257,7 @@ class DownloadArchive:
                                             f" - renewing connection in {self.wait * download_attempt} seconds..."
                                         ),
                                     )
-                                    time.sleep(self.wait * download_attempt)
+                                    self._stop_event.wait(self.wait * download_attempt)
                                     worker.refresh_connection()
                                     continue
                             else:
@@ -255,7 +288,7 @@ class DownloadArchive:
                                 content=f"retry timeout: {self.wait * worker.attempt} seconds...",
                             )
                             worker.message.write()
-                            time.sleep(self.wait * worker.attempt)
+                            self._stop_event.wait(self.wait * worker.attempt)
                         else:
                             worker.message.store(verbose=None, result="FAILED", content="no attempt left")
                             worker.message.write()
@@ -266,7 +299,7 @@ class DownloadArchive:
 
                 if self.delay > 0:
                     vb.write(verbose=True, content=f"\n-----> Worker: {worker.id} - Delay: {self.delay} seconds")
-                    time.sleep(self.delay)
+                    self._stop_event.wait(self.delay)
 
         except Exception as e:
             try:

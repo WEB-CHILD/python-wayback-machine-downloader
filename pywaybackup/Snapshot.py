@@ -1,9 +1,16 @@
 import os
 import threading
+import time
+
+from sqlalchemy.exc import OperationalError
 
 from pywaybackup.db import Database, select, update, waybackup_snapshots, and_
 from pywaybackup.helper import url_split
 from pywaybackup.Verbosity import Verbosity as vb
+
+
+def _is_locked_error(e: Exception) -> bool:
+    return isinstance(e, OperationalError) and "database is locked" in str(e).lower()
 
 
 class Snapshot:
@@ -125,37 +132,63 @@ class Snapshot:
             vb.write(verbose="high", content=f"[Snapshot.fetch] claimed scid={scid} and fetched row")
             return row
 
+        def __get_row_retry(retries=5):
+            # transient 'database is locked' must not bubble up: it would end the worker thread
+            for attempt in range(1, retries + 1):
+                try:
+                    return __get_row()
+                except OperationalError as e:
+                    if not _is_locked_error(e) or attempt == retries:
+                        raise
+                    try:
+                        self._db.session.rollback()
+                    except Exception:
+                        pass
+                    vb.write(
+                        verbose="high",
+                        content=f"[Snapshot.fetch] database locked, retry {attempt}/{retries}",
+                    )
+                    time.sleep(0.5 * attempt)
+
         if __on_sqlite():
             with self.__sqlite_lock:
-                return __get_row()
+                return __get_row_retry()
         else:
-            return __get_row()
+            return __get_row_retry()
 
-    def modify(self, column, value):
+    def modify(self, column, value, retries: int = 5):
         """
         Update a column value for this snapshot in the database.
+        Retries transient 'database is locked' errors before giving up.
 
         Args:
             column (str): Name of the column to update.
             value: New value to set for the column.
+            retries (int): Attempts for transient locking errors.
         """
         column = getattr(waybackup_snapshots, column)
-        try:
-            vb.write(verbose="high", content=f"[Snapshot.modify] updating scid={self.scid} column={column.key}")
-            self._db.session.execute(
-                update(waybackup_snapshots).where(waybackup_snapshots.scid == self.scid).values({column: value})
-            )
-            self._db.session.commit()
-            vb.write(verbose="high", content=f"[Snapshot.modify] update committed scid={self.scid} column={column.key}")
-        except Exception as e:
-            vb.write(
-                verbose="high", content=f"[Snapshot.modify] update failed scid={self.scid} error={e}; rolling back"
-            )
+        for attempt in range(1, retries + 1):
             try:
-                self._db.session.rollback()
-            except Exception:
-                pass
-            raise
+                vb.write(verbose="high", content=f"[Snapshot.modify] updating scid={self.scid} column={column.key}")
+                self._db.session.execute(
+                    update(waybackup_snapshots).where(waybackup_snapshots.scid == self.scid).values({column: value})
+                )
+                self._db.session.commit()
+                vb.write(
+                    verbose="high", content=f"[Snapshot.modify] update committed scid={self.scid} column={column.key}"
+                )
+                return
+            except Exception as e:
+                vb.write(
+                    verbose="high", content=f"[Snapshot.modify] update failed scid={self.scid} error={e}; rolling back"
+                )
+                try:
+                    self._db.session.rollback()
+                except Exception:
+                    pass
+                if not _is_locked_error(e) or attempt == retries:
+                    raise
+                time.sleep(0.5 * attempt)
 
     def create_output(self):
         """
