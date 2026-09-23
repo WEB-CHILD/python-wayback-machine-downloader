@@ -293,7 +293,17 @@ class PyWayBackup:
         if self._reset:
             self._cdxfile.remove()
             self._csvfile.remove()
-            os.remove(self._dbfile) if os.path.exists(self._dbfile) else None
+            self._remove_dbfile()
+
+    def _remove_dbfile(self):
+        """
+        Delete the `.db` file along with its WAL sidecar files (`-wal`, `-shm`).
+
+        A crashed run can leave the sidecars behind; a stale `-wal` next to a
+        fresh database can corrupt it.
+        """
+        for path in (self._dbfile, f"{self._dbfile}-wal", f"{self._dbfile}-shm"):
+            os.remove(path) if os.path.exists(path) else None
 
     def _f_keep(self):
         """
@@ -303,7 +313,7 @@ class PyWayBackup:
         processing is complete.
         """
         if not self._keep:
-            os.remove(self._dbfile) if os.path.exists(self._dbfile) else None
+            self._remove_dbfile()
             self._cdxfile.remove()
 
     def _prep_cdx(self) -> bool:
