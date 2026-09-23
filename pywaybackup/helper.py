@@ -2,6 +2,12 @@ import os
 import shutil
 import magic
 
+# one instance for the run to keep resource usage low
+_mime = magic.Magic(mime=True)
+
+# only keep the header for libmagic
+_MIME_SNIFF_BYTES = 2048
+
 
 def check_nt():
     """
@@ -34,42 +40,17 @@ def sanitize_url(url: str) -> str:
 def url_get_timestamp(url):
     """
     Extract the timestamp from a wayback machine URL.
+
+    Returns an empty string if the URL does not contain a `web/<timestamp>` segment
+    (e.g. relative or external redirect targets).
     """
-    timestamp = url.split("web/")[1].split("/")[0]
+    parts = url.split("web/")
+    if len(parts) < 2:
+        return ""
+    timestamp = parts[1].split("/")[0]
     if "id_" in url:
         timestamp = timestamp.split("id_")[0]
     return timestamp
-
-
-def url_split(url, index=False):
-    """
-    Split a URL into domain, subdir, and filename.
-
-    Index:
-    - [0] = domain
-    - [1] = subdir
-    - [2] = filename
-    """
-    if "://" in url:
-        url = url.split("://")[1]
-    domain = url.split("/")[0]
-    path = url[len(domain):]  # fmt: skip
-    domain = domain.split("@")[-1].split(":")[0]  # remove mailto and port
-    path_parts = path.split("/")
-    path_end = path_parts[-1]
-    if not url.endswith("/") or "." in path_end:
-        filename = path_parts.pop()
-    else:
-        filename = "index.html" if index else ""
-    subdir = "/".join(path_parts).strip("/")
-
-    # Sanitize special characters that are problematic in file- and foldernames
-    special_chars = [":", "*", "?", "&", "=", "<", ">", "\\", "|", "#", "!", "~"]
-    for char in special_chars:
-        subdir = subdir.replace(char, f"%{ord(char):02x}")
-        filename = filename.replace(char, f"%{ord(char):02x}")
-    filename = filename.replace("%20", " ")
-    return domain, subdir, filename
 
 
 def move_index(existpath: str = None, existfile: str = None, filebuffer: bytes = None):
@@ -101,8 +82,23 @@ def move_index(existpath: str = None, existfile: str = None, filebuffer: bytes =
 
 
 def check_index_mime(filebuffer: bytes) -> bool:
-    mime = magic.Magic(mime=True)
-    mime_type = mime.from_buffer(filebuffer)
+    mime_type = _mime.from_buffer(filebuffer[:_MIME_SNIFF_BYTES])
     if mime_type != "text/html":
         return False
     return True
+
+
+def add_html_extension(filepath: str, filebuffer: bytes) -> str:
+    """
+    Append `.html` to a file without extension if its content is html.
+
+    Urls like `/about` or `/docs/guide` carry no extension, so the snapshot is
+    written as an extensionless file that no browser or file manager opens.
+    The content type is sniffed from the buffer instead of the cdx mimetype
+    column, which is often `warc/revisit` or `unk` rather than a real type.
+    """
+    if os.path.splitext(filepath)[1]:
+        return filepath
+    if not check_index_mime(filebuffer):
+        return filepath
+    return filepath + ".html"

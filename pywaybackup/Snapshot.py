@@ -1,11 +1,10 @@
-import os
 import threading
 import time
 
 from sqlalchemy.exc import OperationalError
 
 from pywaybackup.db import Database, select, update, waybackup_snapshots, and_
-from pywaybackup.helper import url_split
+from pywaybackup.Url import Url
 from pywaybackup.Verbosity import Verbosity as vb
 
 
@@ -29,7 +28,7 @@ class Snapshot:
 
     __sqlite_lock = threading.Lock()
 
-    def __init__(self, db: Database, output: str, mode: str):
+    def __init__(self, db: Database, output: str, mode: str, merge_www: bool = True):
         """
         Initialize a Snapshot instance and fetch its database row if available.
 
@@ -37,10 +36,12 @@ class Snapshot:
             db (Database): Database connection/session manager.
             output (str): Output directory for downloaded files.
             mode (str): Download mode ('first', 'last', or default).
+            merge_www (bool): Write www and non-www snapshots into the same folder.
         """
         self._db = db
         self.output = output
         self.mode = mode
+        self.merge_www = merge_www
 
         self._redirect_url = None
         self._redirect_timestamp = None
@@ -54,6 +55,7 @@ class Snapshot:
             self.timestamp = self._row.timestamp
             self.url_archive = self._row.url_archive
             self.url_origin = self._row.url_origin
+            self.url_key = self._row.url_key
             self._redirect_url = self._row.redirect_url
             self._redirect_timestamp = self._row.redirect_timestamp
             self._response_status = self._row.response
@@ -197,19 +199,19 @@ class Snapshot:
         If mode is 'first' or 'last', the path does not include the timestamp.
         Otherwise, the timestamp is included in the path.
 
+        Built from the stored url_key, which is the same value the mode filter
+        grouped by. Re-parsing the url here would risk the two drifting apart.
+
         Returns:
             str: Absolute path to the output file for the snapshot.
         """
-        domain, subdir, filename = url_split(self.url_archive.split("id_/")[1], index=True)
+        timestamp = None if self.mode in ("last", "first") else self.timestamp
 
-        if self.mode == "last" or self.mode == "first":
-            download_dir = os.path.join(self.output, domain, subdir)
-        else:
-            download_dir = os.path.join(self.output, domain, self.timestamp, subdir)
+        # rows written before url_key existed, or by a csv without it
+        if not self.url_key:
+            return Url.from_archive(self.url_archive, merge_www=self.merge_www).to_path(self.output, timestamp)
 
-        download_file = os.path.abspath(os.path.join(download_dir, filename))
-
-        return download_file
+        return Url.path_from_key(self.url_key, self.output, timestamp)
 
     @property
     def redirect_url(self):

@@ -1,7 +1,8 @@
 import json
 
-from pywaybackup.db import Database, Index, and_, delete, func, or_, select, tuple_, update, waybackup_snapshots
+from pywaybackup.db import Database, and_, delete, func, or_, select, text, tuple_, update, waybackup_snapshots
 from pywaybackup.files import CDXfile, CSVfile
+from pywaybackup.Url import Url
 from pywaybackup.Verbosity import Progressbar
 from pywaybackup.Verbosity import Verbosity as vb
 
@@ -28,6 +29,9 @@ class SnapshotCollection:
 
         self._snapshot_faulty = 0  # error while parsing cdx line
 
+        self._merge_www = True  # treat www and non-www as the same url
+
+        self._filter_mailto = 0  # mailto: links in the cdx results
         self._filter_duplicates = 0  # with identical url_archive
         self._filter_mode = 0  # all snapshots filtered by the MODE (last or first)
         self._filter_skip = 0  # content of the csv file
@@ -60,12 +64,13 @@ class SnapshotCollection:
         self.db.write_progress(self._snapshot_handled, self._snapshot_total)
         self.db.session.close()
 
-    def load(self, mode: str, cdxfile: CDXfile, csvfile: CSVfile):
+    def load(self, mode: str, cdxfile: CDXfile, csvfile: CSVfile, merge_www: bool = True):
         """
         Insert the content of the cdx and csv file into the snapshot table.
         """
         self.cdxfile = cdxfile
         self.csvfile = csvfile
+        self._merge_www = merge_www
         if mode == "first":
             self._mode_first = True
         if mode == "last":
@@ -114,12 +119,17 @@ class SnapshotCollection:
                 "statuscode": line[3],
                 "origin": line[4],
             }
+            # cdx results contain mailto: links, which are no downloadable resources
+            if line["origin"].lower().startswith("mailto"):
+                return None
             url_archive = f"https://web.archive.org/web/{line['timestamp']}id_/{line['origin']}"
             statuscode = line["statuscode"] if line["statuscode"] in ("301", "404") else None
             return {
                 "timestamp": line["timestamp"],
                 "url_archive": url_archive,
                 "url_origin": line["origin"],
+                # identity of the file on disk - the mode filter groups by this
+                "url_key": Url(line["origin"], merge_www=self._merge_www).key,
                 "response": statuscode,
             }
 
@@ -189,10 +199,14 @@ class SnapshotCollection:
                         line = line.rsplit(",", 1)[0]
 
                     try:
-                        line_batch.append(__parse_line(line))
+                        parsed = __parse_line(line)
                     except json.decoder.JSONDecodeError:
                         self._snapshot_faulty += 1
                         continue
+                    if parsed is None:
+                        self._filter_mailto += 1
+                        continue
+                    line_batch.append(parsed)
 
                     if len(line_batch) >= line_batchsize:
                         total_inserted += _insert_batch_safe(line_batch=line_batch)
@@ -217,37 +231,47 @@ class SnapshotCollection:
     def _index_snapshots(self):
         """
         Create indexes for the snapshot table.
+
+        Raw DDL instead of sqlalchemy Index objects: Index(...) attaches to the
+        module-global table metadata, which accumulates duplicates when the
+        package is reused in-process (library usage) and breaks create_all().
         """
         # index for filtering last snapshots
         if self._mode_last:
-            idx1 = Index(
-                "idx_waybackup_snapshots_url_origin_timestamp_desc",
-                waybackup_snapshots.url_origin,
-                waybackup_snapshots.timestamp.desc(),
+            self.db.session.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_waybackup_snapshots_url_key_timestamp_desc "
+                    "ON waybackup_snapshots (url_key, timestamp DESC)"
+                )
             )
-            idx1.create(self.db.session.bind, checkfirst=True)
         # index for filtering first snapshots
         if self._mode_first:
-            idx2 = Index(
-                "idx_waybackup_snapshots_url_origin_timestamp_asc",
-                waybackup_snapshots.url_origin,
-                waybackup_snapshots.timestamp.asc(),
+            self.db.session.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_waybackup_snapshots_url_key_timestamp_asc "
+                    "ON waybackup_snapshots (url_key, timestamp ASC)"
+                )
             )
-            idx2.create(self.db.session.bind, checkfirst=True)
         # index for skippable snapshots
-        idx3 = Index(
-            "idx_waybackup_snapshots_timestamp_url_origin_response",
-            waybackup_snapshots.timestamp,
-            waybackup_snapshots.url_origin,
+        self.db.session.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_waybackup_snapshots_timestamp_url_origin_response "
+                "ON waybackup_snapshots (timestamp, url_origin)"
+            )
         )
-        idx3.create(self.db.session.bind, checkfirst=True)
+        self.db.session.commit()
 
     def _filter_snapshots(self):
         """
         Filter the snapshot table.
 
-        - MODE_LAST → keep only the latest snapshot (highest timestamp) per url_origin.
-        - MODE_FIRST → keep only the earliest snapshot (lowest timestamp) per url_origin.
+        - MODE_LAST → keep only the latest snapshot (highest timestamp) per url_key.
+        - MODE_FIRST → keep only the earliest snapshot (lowest timestamp) per url_key.
+
+        Grouped by url_key, not by the raw url_origin: the key is the output path
+        itself, so `http://www.example.com/`, `https://example.com:80/` and
+        `https://example.com./` are one and the same file. Grouping by the raw value
+        would download all of them and let the last one silently overwrite the rest.
         """
 
         def _filter_mode():
@@ -256,11 +280,11 @@ class SnapshotCollection:
                 ordering = (
                     waybackup_snapshots.timestamp.desc() if self._mode_last else waybackup_snapshots.timestamp.asc()
                 )
-                # assign row numbers per url_origin
+                # assign row numbers per file on disk
                 rownum = (
                     func.row_number()
                     .over(
-                        partition_by=waybackup_snapshots.url_origin,
+                        partition_by=waybackup_snapshots.url_key,
                         order_by=ordering,
                     )
                     .label("rn")
@@ -372,6 +396,8 @@ class SnapshotCollection:
         vb.write(content="\nSnapshot calculation:")
         vb.write(content=f"-----> {'in CDX file'.ljust(18)}: {self._cdx_total:,}")
 
+        if self._filter_mailto > 0:
+            vb.write(content=f"-----> {'removed mailto'.ljust(18)}: {self._filter_mailto:,}")
         if self._filter_duplicates > 0:
             vb.write(content=f"-----> {'removed duplicates'.ljust(18)}: {self._filter_duplicates:,}")
         if self._filter_mode > 0:
