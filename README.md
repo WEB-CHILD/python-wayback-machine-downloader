@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/pywaybackup)](https://pypi.org/project/pywaybackup/)
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/pywaybackup)](https://pypi.org/project/pywaybackup/)
-![Python Version](https://img.shields.io/badge/Python-3.8--3.13-blue)
+![Python Version](https://img.shields.io/badge/Python-3.8%2B-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Downloading archived web pages from the [Wayback Machine](https://archive.org/web/).
@@ -31,6 +31,23 @@ This tool allows you to download content from the Wayback Machine (archive.org).
 2. Run the tool <br>
    `waybackup -h`
 
+### Standalone binary
+
+Prebuilt executables for Windows, Linux and macOS are attached to each [release](https://github.com/bitdruid/python-wayback-machine-downloader/releases). No Python required.
+
+- Run from a terminal with arguments like the pip version: `waybackup -h`
+- Or start it without arguments (e.g. double-click on Windows) to enter **interactive mode** — the tool will prompt you for URL, mode and optional settings.
+
+On Linux/macOS the downloaded file has to be made executable first:
+
+```bash
+curl -L -o waybackup https://github.com/bitdruid/python-wayback-machine-downloader/releases/latest/download/waybackup-linux
+chmod +x waybackup
+./waybackup -h
+```
+
+Move it to a directory in your `PATH` (e.g. `~/.local/bin`) to call it as `waybackup` from anywhere.
+
 ### Manual
 
 1. Clone the repository <br>
@@ -56,6 +73,8 @@ You can import pywaybackup into your own scripts and run it. Args are the same a
 Additional args:
 - `silent` (default False): If True, suppresses all output to the console.
 - `debug` (default True): If False, disables writing errors to the error log file.
+- `progress_callback` (default None): A function receiving the `status()` dict on every progress update.
+- `progress_interval` (default 5): Seconds between callback updates while snapshots are downloading.
 
 Use:
 - `run()`
@@ -116,9 +135,44 @@ output:
 }
 ```
 
+Instead of polling `status()`, pass a callback to receive the `status` dict every `progress_interval` seconds (works on `silent` and `progress` disabled).
+
+```python
+from pywaybackup import PyWayBackup
+
+def on_progress(status):
+    print(status)
+
+backup = PyWayBackup(
+  url="https://example.com",
+  last=True,
+  silent=True,
+  progress=False,
+  progress_callback=on_progress,
+  progress_interval=5
+)
+
+backup.run()
+```
+output:
+```bash
+{'task': 'downloading cdx', 'current': 0, 'total': 0, 'progress': '0'}
+{'task': 'preparing snapshots', 'current': 0, 'total': 0, 'progress': '0'}
+{'task': 'downloading snapshots', 'current': 15, 'total': 84, 'progress': '18%'}
+{'task': 'downloading snapshots', 'current': 54, 'total': 84, 'progress': '64%'}
+{'task': 'downloading snapshots', 'current': 84, 'total': 84, 'progress': '100%'}
+{'task': 'done', 'current': 84, 'total': 84, 'progress': '100%'}
+```
+
+Any callable taking one argument works - a function, a bound method, or a lambda for something short.
+
+An exception raised inside the callback is logged and ignored - it will not abort a running job. When using `run(daemon=True)`, the callback runs inside the spawned process, so its side effects are not visible to the parent.
+
 ## cli
 
 - `-h`, `--help`: Show the help message and exit. Version info is shown in the help header.
+
+> **Interactive mode:** running `waybackup` without any arguments in a terminal starts a guided prompt for URL, mode and optional settings. Without a terminal (scripts/cron), the help is printed instead.
 
 #### Required
 
@@ -133,6 +187,8 @@ output:
   Last Version. Gives one folder containing the last version of each file of specified `--range`.
 - **`-f`**, **`--first`**:<br>
   First Version. Gives one folder containing the first version of each file of specified `--range`.
+- **`-s`**, **`--save`**:<br>
+  Save a page to the wayback machine (no download).
 
 #### Optional query parameters
 
@@ -196,6 +252,9 @@ Parameters will change the download behavior for snapshots.
 
 - **`--no-redirect`**:<br>
   Disables following redirects of snapshots. Can prevent timestamp-folder mismatches caused by redirects.
+
+- **`--no-merge-www`**:<br>
+  Keeps `www.example.com` and `example.com` in separate folders. By default both are treated as the same site and written into one folder, as archive.org returns them mixed together for a single query. Only use this if the two hosts served genuinely different content.
 
 - **`--retry`** `<attempts>`:<br>
   Retry attempts for failed downloads.

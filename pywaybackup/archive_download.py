@@ -11,7 +11,7 @@ from socket import timeout
 from urllib.parse import urljoin
 
 from pywaybackup.Exception import Exception as ex
-from pywaybackup.helper import check_nt, move_index, url_get_timestamp
+from pywaybackup.helper import add_html_extension, check_nt, move_index, url_get_timestamp
 from pywaybackup.SnapshotCollection import SnapshotCollection
 from pywaybackup.Verbosity import Verbosity as vb
 from pywaybackup.Worker import Worker
@@ -84,7 +84,17 @@ class DownloadArchive:
         sc (SnapshotCollection): The snapshot collection being processed.
     """
 
-    def __init__(self, mode: str, output: str, retry: int, no_redirect: bool, delay: int, wait: int, workers: int):
+    def __init__(
+        self,
+        mode: str,
+        output: str,
+        retry: int,
+        no_redirect: bool,
+        delay: int,
+        wait: int,
+        workers: int,
+        merge_www: bool = True,
+    ):
         """
         Initialize the download manager with configuration options.
 
@@ -95,9 +105,11 @@ class DownloadArchive:
             no_redirect (bool): Disable redirect handling if True.
             delay (int): Delay between downloads in seconds.
             workers (int): Number of worker threads.
+            merge_www (bool): Write www and non-www snapshots into the same folder.
         """
         self.mode = mode
         self.output = output
+        self.merge_www = merge_www
         self.retry = retry
         self.no_redirect = no_redirect
         self.delay = delay
@@ -130,7 +142,7 @@ class DownloadArchive:
 
         threads = []
         for i in range(self.workers):
-            worker = Worker(id=i + 1, output=self.output, mode=self.mode)
+            worker = Worker(id=i + 1, output=self.output, mode=self.mode, merge_www=self.merge_www)
             vb.write(verbose=True, content=f"\n-----> Starting Worker: {worker.id}")
             thread = threading.Thread(target=self._download_loop, args=(worker,), daemon=True)
             threads.append(thread)
@@ -275,7 +287,7 @@ class DownloadArchive:
                 pass
             ex.exception(f"\nWorker: {worker.id} - Exception", e)
         finally:
-            worker.close()  
+            worker.close()
 
     def _download(self, worker: Worker):
         """
@@ -296,6 +308,7 @@ class DownloadArchive:
 
         if context.response_status == 200:
             context.output_file = worker.snapshot.create_output()
+            context.output_file = add_html_extension(context.output_file, context.response_data)
             context.output_path = os.path.dirname(context.output_file)
 
             # if output_file is too long for windows, skip download
@@ -310,15 +323,6 @@ class DownloadArchive:
             # download file if not existing
             if not os.path.isfile(context.output_file):
                 with open(context.output_file, "wb") as file:
-                    if context.response.getheader("Content-Encoding") == "gzip":
-                        try:
-                            context.response_data = gzip.decompress(context.response_data)
-                        except BadGzipFile:
-                            vb.write(
-                                verbose=None,
-                                content=f"Worker: {worker.id} - GZIP DECOMPRESS SKIPPED - {context.snapshot_url}",
-                            )
-                            pass
                     file.write(context.response_data)
 
                 # check if file is downloaded
@@ -345,9 +349,10 @@ class DownloadArchive:
             self.__download_response(context=context, worker=worker)
             location = context.response.getheader("Location")
             if location:
-                context.encoded_download_url = context.encode_url(urljoin(context.snapshot_url, location))
+                resolved_location = urljoin(context.snapshot_url, location)
+                context.encoded_download_url = context.encode_url(resolved_location)
                 worker.message.store(verbose=True, result="", info="TO", content=location)
-                worker.snapshot.redirect_timestamp = url_get_timestamp(location)
+                worker.snapshot.redirect_timestamp = url_get_timestamp(resolved_location)
                 worker.snapshot.redirect_url = context.snapshot_url
             else:
                 break
@@ -432,3 +437,13 @@ class DownloadArchive:
         context.response = worker.connection.getresponse()
         context.response_data = context.response.read()
         context.response_status = context.response.status
+
+        # decompress before sniff
+        if context.response.getheader("Content-Encoding") == "gzip":
+            try:
+                context.response_data = gzip.decompress(context.response_data)
+            except BadGzipFile:
+                vb.write(
+                    verbose=None,
+                    content=f"Worker: {worker.id} - GZIP DECOMPRESS SKIPPED - {context.snapshot_url}",
+                )
