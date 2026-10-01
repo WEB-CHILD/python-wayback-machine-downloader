@@ -11,7 +11,7 @@ packages = ["pywaybackup"]
 dependencies = [
     "ruff",
     "SQLAlchemy==2.0.51",
-    "requests==2.32.3",
+    "requests==2.33.0",
     "tqdm==4.67.1",
     "python-magic-standalone==0.4.28",
 ]
