@@ -2,18 +2,61 @@ import gzip
 import http.client
 import os
 import threading
+import time
 import urllib.parse
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from gzip import BadGzipFile
 from http import HTTPStatus
 from importlib.metadata import version
 from socket import timeout
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from pywaybackup.Exception import Exception as ex
 from pywaybackup.helper import add_html_extension, check_nt, move_index, url_get_timestamp
 from pywaybackup.SnapshotCollection import SnapshotCollection
 from pywaybackup.Verbosity import Verbosity as vb
 from pywaybackup.Worker import Worker
+
+
+# How many consecutive 429 responses (across all workers) are tolerated before the run is stopped.
+RATE_LIMIT_MAX_STRIKES = 5
+# Longest pause the downloader is willing to sit through; a longer Retry-After stops the run instead.
+RATE_LIMIT_MAX_WAIT = 3600
+
+
+class RateLimited(Exception):
+    """
+    Raised when the Wayback Machine answers a download with 429 Too Many Requests.
+
+    Attributes:
+        retry_after (float | None): Seconds the server asked us to wait, if it said.
+    """
+
+    def __init__(self, retry_after: float = None):
+        super().__init__(f"429 Too Many Requests (Retry-After: {retry_after})")
+        self.retry_after = retry_after
+
+
+def parse_retry_after(value: str) -> float:
+    """
+    Parse a Retry-After header value (delta-seconds or HTTP-date) into seconds.
+
+    Returns:
+        float | None: Seconds to wait (never negative), or None if absent/unparseable.
+    """
+    if not value:
+        return None
+    value = value.strip()
+    if value.isdigit():
+        return float(value)
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
 
 
 class DownloadContext:
@@ -39,7 +82,10 @@ class DownloadContext:
             snapshot_url (str): The URL of the snapshot to download.
         """
         self.snapshot_url = snapshot_url
-        self.headers = {"User-Agent": f"bitdruid-python-wayback-downloader/{version('pywaybackup')}"}
+        self.headers = {
+            "User-Agent": f"bitdruid-python-wayback-downloader/{version('pywaybackup')}",
+            "Accept": "*/*",
+        }
         self.encoded_download_url = self.encode_url(snapshot_url)
         self.output_file = None
         self.output_path = None
@@ -60,6 +106,27 @@ class DownloadContext:
             str: The encoded URL.
         """
         return urllib.parse.quote(url, safe=":/?&=")
+
+    @staticmethod
+    def request_target(url: str) -> str:
+        """
+        Reduce an absolute URL to the origin-form request target (path + query).
+
+        http.client writes whatever it is given verbatim into the request line, so passing
+        the full URL produces `GET https://web.archive.org/web/... HTTP/1.1` (absolute-form,
+        meant for proxies). The Wayback Machine answers that form with 429, so only the
+        path is sent; the host is already carried by the connection and the Host header.
+
+        Args:
+            url (str): Absolute (already encoded) URL.
+        Returns:
+            str: e.g. `/web/20021108005222id_/http://example.com/a.gif?x=1`
+        """
+        parts = urlsplit(url)
+        target = parts.path or "/"
+        if parts.query:
+            target += f"?{parts.query}"
+        return target
 
     @property
     def response_status_message(self):
@@ -116,6 +183,11 @@ class DownloadArchive:
         self.workers = workers
         self.sc = None
         self._stop_event = threading.Event()
+        # shared 429 state: one pause for all workers, consecutive strikes decide when to give up
+        self._rate_limit_lock = threading.Lock()
+        self._rate_limit_until = 0.0  # time.monotonic() until which no worker sends a request
+        self._rate_limit_strikes = 0
+        self.rate_limited = False  # True if the run was stopped because of 429 responses
 
     def run(self, SnapshotCollection: SnapshotCollection):
         """
@@ -217,7 +289,15 @@ class DownloadArchive:
                         download_status = False
 
                         try:
+                            self._wait_for_rate_limit()
+                            if self._stop_event.is_set():
+                                break
                             download_status = self._download(worker=worker)
+
+                        except RateLimited as e:
+                            if self._register_rate_limit(worker=worker, retry_after=e.retry_after):
+                                continue  # same snapshot again once the shared pause is over
+                            break  # run is stopping; snapshot stays unprocessed for the next resume
 
                         except (
                             timeout,
@@ -322,6 +402,79 @@ class DownloadArchive:
         finally:
             worker.close()
 
+    def _wait_for_rate_limit(self) -> None:
+        """
+        Block until the shared rate-limit pause is over (or the run is stopped).
+        """
+        while not self._stop_event.is_set():
+            with self._rate_limit_lock:
+                remaining = self._rate_limit_until - time.monotonic()
+            if remaining <= 0:
+                return
+            self._stop_event.wait(remaining)
+
+    def _register_rate_limit(self, worker: Worker, retry_after: float = None) -> bool:
+        """
+        Record a 429 response and schedule a pause shared by all workers.
+
+        The pause is the longer of the server's Retry-After and an exponential backoff
+        (based on `wait`). After RATE_LIMIT_MAX_STRIKES consecutive 429s, or if the
+        server asks for more than RATE_LIMIT_MAX_WAIT seconds, the whole run is stopped
+        instead of continuing to send requests.
+
+        Returns:
+            bool: True to retry the snapshot after the pause, False if the run is stopping.
+        """
+        with self._rate_limit_lock:
+            now = time.monotonic()
+            if now < self._rate_limit_until:
+                # request was already in flight when another worker hit the limit - same strike
+                return True
+
+            self._rate_limit_strikes += 1
+            strikes = self._rate_limit_strikes
+            pause = max(self.wait, 5) * 2 ** (strikes - 1)
+            if retry_after is not None:
+                pause = max(pause, retry_after)
+
+            if strikes > RATE_LIMIT_MAX_STRIKES or pause > RATE_LIMIT_MAX_WAIT:
+                reason = (
+                    f"{strikes - 1} consecutive 429 responses"
+                    if strikes > RATE_LIMIT_MAX_STRIKES
+                    else f"server asked to wait {int(pause)} seconds"
+                )
+                worker.message.store(verbose=None, result="RATELIMIT", content=f"stopping download ({reason})")
+                worker.message.write()
+                vb.write(
+                    content=(
+                        f"\nRATE LIMITED -> stopping download ({reason}). "
+                        "Progress is kept - rerun later to resume."
+                    )
+                )
+                self.rate_limited = True
+                self._stop_event.set()
+                return False
+
+            self._rate_limit_until = now + pause
+            retry_info = f", Retry-After: {int(retry_after)}s" if retry_after is not None else ""
+            worker.message.store(
+                verbose=None,
+                result="RATELIMIT",
+                content=(
+                    f"429 Too Many Requests - pausing all workers for {int(pause)} seconds "
+                    f"[{strikes}/{RATE_LIMIT_MAX_STRIKES}{retry_info}]"
+                ),
+            )
+            worker.message.write()
+            return True
+
+    def _clear_rate_limit(self) -> None:
+        """
+        Reset the consecutive 429 counter after any non-429 response.
+        """
+        with self._rate_limit_lock:
+            self._rate_limit_strikes = 0
+
     def _download(self, worker: Worker):
         """
         Download a single snapshot using the provided worker.
@@ -333,11 +486,18 @@ class DownloadArchive:
         """
         context = DownloadContext(snapshot_url=worker.snapshot.url_archive)
 
+        # raises RateLimited on 429 before anything is written, so the snapshot stays unprocessed
         self.__download_response(context=context, worker=worker)
+        self._clear_rate_limit()
         worker.snapshot.response_status = context.response_status
 
         if not self.no_redirect and context.response_status == 302:
-            self.__handle_redirect(context=context, worker=worker)
+            try:
+                self.__handle_redirect(context=context, worker=worker)
+            except RateLimited:
+                # 302 is already stored; put the row back to claimed-but-unprocessed so a resume retries it
+                worker.snapshot.response_status = "LOCK"
+                raise
 
         if context.response_status == 200:
             context.output_file = worker.snapshot.create_output()
@@ -465,11 +625,18 @@ class DownloadArchive:
         Args:
             context (DownloadContext): The download context.
             worker (Worker): The worker instance.
+
+        Raises:
+            RateLimited: If the server answered 429 Too Many Requests.
         """
-        worker.connection.request("GET", context.encoded_download_url, headers=context.headers)
+        target = context.request_target(context.encoded_download_url)
+        worker.connection.request("GET", target, headers=context.headers)
         context.response = worker.connection.getresponse()
         context.response_data = context.response.read()
         context.response_status = context.response.status
+
+        if context.response_status == 429:
+            raise RateLimited(retry_after=parse_retry_after(context.response.getheader("Retry-After")))
 
         # decompress before sniff
         if context.response.getheader("Content-Encoding") == "gzip":

@@ -378,6 +378,8 @@ class PyWayBackup:
             merge_www=self._merge_www,
         )
         downloader.run(SnapshotCollection=collection)
+        if downloader.rate_limited:
+            self._keep = True  # keep db/cdx so the stopped run can be resumed
 
     def _notify(self, task: str = None):
         """
